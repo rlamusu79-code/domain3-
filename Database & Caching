@@ -1,0 +1,230 @@
+🗄️ Modul C — Database & Caching (DynamoDB + ElastiCache Redis)
+
+Kode yang kamu kirim menerapkan pola Cache-Aside Pattern, yaitu pola caching yang paling sering digunakan di AWS.
+
+Alur Cache-Aside
+Client Request
+      │
+      ▼
+Redis Cache
+      │
+ ┌────┴────┐
+ │ Hit     │ Miss
+ ▼         ▼
+Return   DynamoDB
+Data        │
+            ▼
+      Simpan ke Redis
+            │
+            ▼
+      Return Data
+Penjelasan Kode
+1. Koneksi Redis
+r = redis.Redis(
+    host=os.environ['REDIS_ENDPOINT'],
+    port=6379,
+    ssl=True,
+    decode_responses=True
+)
+
+Menghubungkan aplikasi ke cluster Redis di ElastiCache.
+
+Parameter:
+
+Parameter	Fungsi
+host	Endpoint Redis
+port	Port Redis (6379)
+ssl=True	Enkripsi koneksi
+decode_responses=True	Hasil berupa string
+2. Koneksi DynamoDB
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('lks2026-results')
+
+Mengakses tabel DynamoDB bernama:
+
+lks2026-results
+3. Membuat Cache Key
+cache_key = f"item:{item_id}"
+
+Misalnya:
+
+item_id = "123"
+
+menjadi:
+
+item:123
+
+Key ini digunakan di Redis.
+
+4. Cek Cache Dulu
+cached = r.get(cache_key)
+
+Jika data ada:
+
+if cached:
+    return json.loads(cached)
+
+Maka:
+
+✅ Tidak perlu query DynamoDB
+
+✅ Response sangat cepat (milidetik)
+
+Ini disebut:
+
+Cache Hit
+5. Jika Tidak Ada di Cache
+response = table.get_item(
+    Key={
+        'pk': f"ITEM#{item_id}",
+        'sk': 'METADATA'
+    }
+)
+
+Contoh data DynamoDB:
+
+pk	sk	name	score
+ITEM#123	METADATA	Rahmat	95
+
+Query:
+
+pk = ITEM#123
+sk = METADATA
+
+Ini disebut:
+
+Cache Miss
+6. Simpan ke Redis
+r.setex(
+    cache_key,
+    300,
+    json.dumps(item)
+)
+
+Artinya:
+
+Key      : item:123
+Value    : data JSON
+Expire   : 300 detik (5 menit)
+
+Setelah 5 menit:
+
+Redis otomatis menghapus data
+
+TTL (Time To Live):
+
+300 seconds
+7. Return Data
+return item
+
+Data dikirim kembali ke user.
+
+Contoh Jalannya Program
+Request Pertama
+get_item_with_cache("123")
+
+Redis:
+
+item:123 ❌
+
+Maka:
+
+Redis Miss
+↓
+DynamoDB Query
+↓
+Simpan ke Redis
+↓
+Return Data
+
+Waktu:
+
+≈ 20-50 ms
+Request Kedua
+get_item_with_cache("123")
+
+Redis:
+
+item:123 ✅
+
+Maka:
+
+Redis Hit
+↓
+Return Data
+
+Waktu:
+
+≈ 1-3 ms
+
+Lebih cepat 10–50x dibanding query database.
+
+Kapan Menggunakan Redis?
+
+Cocok untuk:
+
+Leaderboard
+Top 10 peserta
+Data User
+Profil user
+Hasil Kompetisi
+Skor peserta
+Session Login
+JWT / Session
+API Response
+Data yang sering dibaca
+Soal LKS yang Mungkin Keluar
+Q1
+
+Mengapa menggunakan Redis di depan DynamoDB?
+
+Jawaban:
+
+Mengurangi latency,
+mengurangi jumlah read ke DynamoDB,
+dan meningkatkan performa aplikasi.
+Q2
+
+Apa yang dimaksud Cache Hit?
+
+Jawaban:
+
+Data ditemukan di Redis sehingga tidak perlu query database.
+Q3
+
+Apa yang dimaksud Cache Miss?
+
+Jawaban:
+
+Data tidak ditemukan di Redis sehingga aplikasi mengambil data dari DynamoDB.
+Q4
+
+Apa fungsi setex()?
+
+Jawaban:
+
+Menyimpan data ke Redis sekaligus menentukan TTL (expire time).
+Ringkasan Hafalan LKS
+Redis = cache in-memory super cepat
+
+Cache Hit
+→ baca dari Redis
+
+Cache Miss
+→ baca dari DynamoDB
+→ simpan ke Redis
+
+setex(key, ttl, value)
+→ simpan cache dengan waktu kadaluarsa
+
+Keuntungan:
+✓ lebih cepat
+✓ lebih murah
+✓ mengurangi beban DynamoDB
+✓ cocok untuk data yang sering dibaca
+
+Untuk LKS Cloud Computing 2026, pahami juga perbedaan penggunaan:
+
+Amazon DynamoDB → NoSQL, serverless, key-value/document.
+Amazon RDS → SQL (MySQL, PostgreSQL, dll).
+Amazon ElastiCache → Redis/Memcached untuk caching berkecepatan tinggi.
