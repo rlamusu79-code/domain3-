@@ -1,0 +1,396 @@
+Modul C ini berfokus pada Data Analytics Serverless AWS, yaitu mengolah data mentah di S3 menjadi data siap analisis menggunakan Glue, Athena, dan OpenSearch.
+
+Arsitektur Lengkap
+Raw Data (CSV/JSON)
+        │
+        ▼
+S3 Bucket (raw/)
+        │
+        ▼
+Glue Crawler
+(deteksi schema otomatis)
+        │
+        ▼
+Glue Data Catalog
+(metadata tabel)
+        │
+        ▼
+Glue ETL Job (PySpark)
+(transformasi & konversi)
+        │
+        ▼
+S3 Bucket (processed/)
+(Parquet + Partition)
+        │
+        ▼
+Athena
+(SQL Query Serverless)
+        │
+        ▼
+OpenSearch Dashboard
+(Visualisasi Data)
+Praktik dari Awal Sampai Akhir
+1. Buat S3 Bucket
+
+Misalnya:
+
+lks2026-data
+
+Buat folder:
+
+raw/
+processed/
+
+Struktur:
+
+s3://lks2026-data/raw/
+s3://lks2026-data/processed/
+2. Upload Data Mentah
+
+Contoh file:
+
+transaction_id,user_id,category,amount,status,created_at
+TX001,U001,Food,100,Success,2026-01-01
+TX002,U002,Transport,50,Success,2026-01-02
+TX003,U003,Food,200,Success,2026-01-03
+TX004,U004,Shopping,500,Success,2026-01-04
+
+Upload ke:
+
+s3://lks2026-data/raw/transactions.csv
+3. Buat Glue Database
+
+Masuk:
+
+AWS Glue
+→ Data Catalog
+→ Databases
+→ Add Database
+
+Nama:
+
+lks2026_db
+4. Buat Glue Crawler
+
+Masuk:
+
+AWS Glue
+→ Crawlers
+→ Create Crawler
+
+Data Source:
+
+s3://lks2026-data/raw/
+
+Database:
+
+lks2026_db
+
+Crawler akan membuat tabel:
+
+raw_transactions
+
+Schema otomatis:
+
+transaction_id string
+user_id string
+category string
+amount bigint
+status string
+created_at string
+
+Jalankan crawler.
+
+5. Buat IAM Role Glue
+
+Buat role:
+
+GlueServiceRole
+
+Policy:
+
+AWSGlueServiceRole
+AmazonS3FullAccess
+
+atau minimal:
+
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect":"Allow",
+      "Action":[
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket"
+      ],
+      "Resource":"*"
+    }
+  ]
+}
+6. Buat Glue ETL Job
+
+Masuk:
+
+AWS Glue
+→ ETL Jobs
+→ Create Job
+
+Runtime:
+
+Glue 5.0
+Python 3
+Spark
+
+Role:
+
+GlueServiceRole
+
+Script:
+
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql.functions import col, to_date, year, month
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+datasource = glueContext.create_dynamic_frame.from_catalog(
+    database="lks2026_db",
+    table_name="raw_transactions"
+)
+
+df = datasource.toDF()
+
+df_clean = (
+    df.dropna(subset=['transaction_id', 'amount'])
+      .filter(col('amount') > 0)
+      .withColumn(
+          'transaction_date',
+          to_date(col('created_at'))
+      )
+      .withColumn(
+          'year',
+          year(col('transaction_date'))
+      )
+      .withColumn(
+          'month',
+          month(col('transaction_date'))
+      )
+)
+
+df_clean.write \
+    .partitionBy("year", "month") \
+    .mode("overwrite") \
+    .parquet(
+        "s3://lks2026-data/processed/transactions/"
+    )
+
+job.commit()
+7. Jalankan ETL Job
+
+Klik:
+
+Run Job
+
+Hasil:
+
+s3://lks2026-data/processed/transactions/
+
+menjadi:
+
+transactions/
+ ├── year=2026
+ │     └── month=1
+ │           ├── part-00000.parquet
+ │           ├── part-00001.parquet
+
+Data sekarang berbentuk:
+
+Parquet
+
+yang jauh lebih efisien dibanding CSV.
+
+8. Query dengan Athena
+
+Masuk:
+
+Amazon Athena
+
+Buat database:
+
+CREATE DATABASE IF NOT EXISTS lks2026_db;
+Buat Tabel Athena
+CREATE EXTERNAL TABLE lks2026_db.transactions (
+  transaction_id STRING,
+  user_id STRING,
+  category STRING,
+  amount DOUBLE,
+  status STRING
+)
+PARTITIONED BY (
+  year INT,
+  month INT
+)
+STORED AS PARQUET
+LOCATION 's3://lks2026-data/processed/transactions/';
+Load Partition
+MSCK REPAIR TABLE lks2026_db.transactions;
+
+Athena akan mendeteksi:
+
+year=2026
+month=1
+
+secara otomatis.
+
+9. Query Analitik
+Total transaksi
+SELECT COUNT(*)
+FROM lks2026_db.transactions;
+Total pendapatan
+SELECT SUM(amount)
+FROM lks2026_db.transactions;
+Top kategori
+SELECT
+  category,
+  COUNT(*) AS total_transactions,
+  SUM(amount) AS total_amount
+FROM lks2026_db.transactions
+GROUP BY category
+ORDER BY total_amount DESC;
+
+Contoh hasil:
+
+category	total_transactions	total_amount
+Shopping	1	500
+Food	2	300
+Transport	1	50
+Rata-rata transaksi
+SELECT
+  category,
+  AVG(amount) AS avg_amount
+FROM lks2026_db.transactions
+GROUP BY category;
+10. Integrasi ke OpenSearch
+
+Buat:
+
+Amazon OpenSearch Service
+
+Domain:
+
+lks2026-analytics
+
+Engine:
+
+OpenSearch 2.x
+Athena → OpenSearch
+
+Pilihan yang umum:
+
+Opsi 1 (Paling Mudah)
+
+Athena Query
+
+↓
+
+Export hasil ke S3
+
+↓
+
+Glue Job
+
+↓
+
+OpenSearch
+
+Opsi 2 (Realtime)
+S3
+ ↓
+Lambda
+ ↓
+OpenSearch
+
+setiap file baru otomatis masuk dashboard.
+
+Visualisasi Dashboard
+
+Buat grafik:
+
+Total Sales
+SUM(amount)
+Transaction by Category
+Pie Chart
+Monthly Revenue
+Line Chart
+Top Users
+Bar Chart
+Optimasi yang Sering Ditanya Juri LKS
+Kenapa pakai Parquet?
+
+CSV:
+
+Ukuran besar
+Scan semua kolom
+Lambat
+
+Parquet:
+
+Kolumnar
+Terkompresi
+Lebih cepat
+Lebih murah
+
+Penghematan bisa mencapai 5–10 kali atau lebih tergantung data.
+
+Kenapa pakai Partition?
+
+Tanpa partition:
+
+SELECT *
+FROM transactions
+WHERE year=2026;
+
+Athena scan seluruh dataset.
+
+Dengan partition:
+
+WHERE year=2026
+AND month=1
+
+Athena hanya membaca folder:
+
+year=2026/month=1/
+
+sehingga query jauh lebih cepat dan biaya lebih rendah.
+
+Output Akhir Modul C
+
+Setelah selesai, Anda memiliki pipeline:
+
+CSV di S3
+   ↓
+Glue Crawler
+   ↓
+Glue Catalog
+   ↓
+Glue ETL (PySpark)
+   ↓
+Parquet + Partition
+   ↓
+Athena SQL
+   ↓
+OpenSearch Dashboard
+
+Ini adalah arsitektur data lake analytics yang umum digunakan di AWS untuk mengolah data besar secara serverless.
