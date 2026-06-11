@@ -1,0 +1,455 @@
+Jika ini untuk persiapan LKS Cloud Computing 2026, fokusnya bukan hanya memahami kode, tetapi juga bisa membangun end-to-end solution di AWS. Berikut tata cara lengkap dari awal sampai RAG dan Rekognition berjalan.
+
+BAGIAN 1 — RAG (Bedrock + OpenSearch)
+Arsitektur
+PDF/TXT
+   ↓
+S3
+   ↓
+Lambda / Script Python
+   ↓
+Titan Embedding Model
+   ↓
+OpenSearch Vector Index
+   ↓
+User Query
+   ↓
+Titan Embedding
+   ↓
+Vector Search
+   ↓
+Claude 3 Haiku
+   ↓
+Jawaban
+STEP 1 — Buat S3 Bucket
+
+Masuk AWS Console
+
+S3
+→ Create Bucket
+
+Nama:
+
+lks2026-rag-bucket
+
+Upload file knowledge base:
+
+aws-cloud.pdf
+terraform-guide.pdf
+ecs-guide.pdf
+STEP 2 — Buat OpenSearch Domain
+
+Masuk:
+
+Amazon OpenSearch Service
+
+Create Domain
+
+Pilihan:
+
+Domain Name:
+lks2026-search
+
+Deployment:
+Development and testing
+
+Engine:
+OpenSearch 2.11+
+
+Enable:
+
+Vector Search
+
+Access Policy:
+
+Only IAM
+
+Buat domain dan tunggu ±15 menit.
+
+Catat:
+
+Endpoint
+
+Contoh:
+
+https://search-lks2026-search.xxx.ap-southeast-3.es.amazonaws.com
+STEP 3 — IAM Permission
+
+Buat Role:
+
+LKS2026-RAG-Role
+
+Tambahkan policy:
+
+AmazonBedrockFullAccess
+AmazonOpenSearchServiceFullAccess
+AmazonS3ReadOnlyAccess
+STEP 4 — Install Library
+
+Di EC2 atau CloudShell:
+
+pip install boto3
+pip install opensearch-py
+pip install requests-aws4auth
+pip install pypdf
+STEP 5 — Enable Bedrock Model
+
+Masuk:
+
+Amazon Bedrock
+→ Model Access
+
+Request Access:
+
+Titan Embeddings
+Claude 3 Haiku
+
+Model yang dipakai:
+
+amazon.titan-embed-text-v1
+
+anthropic.claude-3-haiku-20240307-v1:0
+STEP 6 — Buat Vector Index
+from opensearchpy import OpenSearch
+
+client.indices.create(
+    index='lks2026-knowledge',
+    body={
+        "settings": {
+            "index": {
+                "knn": True
+            }
+        },
+        "mappings": {
+            "properties": {
+                "text": {
+                    "type": "text"
+                },
+                "vector": {
+                    "type": "knn_vector",
+                    "dimension": 1536
+                }
+            }
+        }
+    }
+)
+
+Jika berhasil:
+
+Index created
+STEP 7 — Extract PDF
+from pypdf import PdfReader
+
+def read_pdf(path):
+    reader = PdfReader(path)
+
+    text = ""
+
+    for page in reader.pages:
+        text += page.extract_text()
+
+    return text
+STEP 8 — Generate Embedding
+import boto3
+import json
+
+bedrock = boto3.client(
+    'bedrock-runtime',
+    region_name='ap-southeast-1'
+)
+
+def embed_text(text):
+
+    response = bedrock.invoke_model(
+        modelId='amazon.titan-embed-text-v1',
+        body=json.dumps({
+            "inputText": text
+        })
+    )
+
+    result = json.loads(
+        response['body'].read()
+    )
+
+    return result['embedding']
+STEP 9 — Index Dokumen
+text = read_pdf("aws-cloud.pdf")
+
+vector = embed_text(text)
+
+client.index(
+    index="lks2026-knowledge",
+    body={
+        "text": text,
+        "vector": vector
+    }
+)
+
+Verifikasi:
+
+GET lks2026-knowledge/_count
+
+Output:
+
+{
+  "count": 1
+}
+STEP 10 — Retrieval
+def retrieve_docs(question):
+
+    q_vector = embed_text(question)
+
+    response = client.search(
+        index='lks2026-knowledge',
+        body={
+            "size":3,
+            "query":{
+                "knn":{
+                    "vector":{
+                        "vector": q_vector,
+                        "k":3
+                    }
+                }
+            }
+        }
+    )
+
+    docs = []
+
+    for hit in response["hits"]["hits"]:
+        docs.append(hit["_source"]["text"])
+
+    return docs
+STEP 11 — Generate Jawaban
+def ask_rag(question):
+
+    docs = retrieve_docs(question)
+
+    context = "\n".join(docs)
+
+    prompt = f"""
+Context:
+{context}
+
+Question:
+{question}
+
+Answer:
+"""
+
+    response = bedrock.invoke_model(
+        modelId="anthropic.claude-3-haiku-20240307-v1:0",
+        body=json.dumps({
+            "anthropic_version":"bedrock-2023-05-31",
+            "max_tokens":1000,
+            "messages":[
+                {
+                    "role":"user",
+                    "content":prompt
+                }
+            ]
+        })
+    )
+
+    result = json.loads(
+        response["body"].read()
+    )
+
+    return result["content"][0]["text"]
+
+Test:
+
+print(
+    ask_rag(
+        "Apa fungsi Amazon ECS?"
+    )
+)
+BAGIAN 2 — REKOGNITION + LAMBDA
+Arsitektur
+Upload Gambar
+      ↓
+S3
+      ↓
+Event Trigger
+      ↓
+Lambda
+      ↓
+Rekognition
+      ↓
+DynamoDB
+STEP 1 — Buat Bucket
+lks2026-images
+STEP 2 — Buat DynamoDB
+
+Table:
+
+ImageAnalysis
+
+Partition Key:
+
+image_name
+STEP 3 — IAM Role Lambda
+
+Tambahkan:
+
+AWSLambdaBasicExecutionRole
+
+AmazonRekognitionFullAccess
+
+AmazonDynamoDBFullAccess
+
+AmazonS3ReadOnlyAccess
+STEP 4 — Buat Lambda
+
+Runtime:
+
+Python 3.12
+
+Nama:
+
+lks2026-image-analysis
+STEP 5 — Kode Lambda
+import boto3
+
+rekognition = boto3.client("rekognition")
+table = boto3.resource(
+    "dynamodb"
+).Table("ImageAnalysis")
+
+Deteksi label:
+
+def detect_labels(bucket,key):
+
+    response = rekognition.detect_labels(
+        Image={
+            "S3Object":{
+                "Bucket":bucket,
+                "Name":key
+            }
+        },
+        MaxLabels=10
+    )
+
+    return response["Labels"]
+STEP 6 — OCR
+def detect_text(bucket,key):
+
+    response = rekognition.detect_text(
+        Image={
+            "S3Object":{
+                "Bucket":bucket,
+                "Name":key
+            }
+        }
+    )
+
+    texts=[]
+
+    for item in response["TextDetections"]:
+        if item["Type"]=="LINE":
+            texts.append(item["DetectedText"])
+
+    return texts
+STEP 7 — Simpan ke DynamoDB
+table.put_item(
+    Item={
+        "image_name":key,
+        "labels":labels,
+        "texts":texts
+    }
+)
+STEP 8 — Lambda Handler
+def lambda_handler(event, context):
+
+    bucket = event['Records'][0]['s3']['bucket']['name']
+
+    key = event['Records'][0]['s3']['object']['key']
+
+    labels = detect_labels(bucket,key)
+
+    texts = detect_text(bucket,key)
+
+    table.put_item(
+        Item={
+            "image_name":key,
+            "labels":labels,
+            "texts":texts
+        }
+    )
+
+    return {
+        "statusCode":200
+    }
+STEP 9 — Trigger S3
+
+Masuk bucket:
+
+Properties
+→ Event Notifications
+→ Create Event
+
+Event:
+
+All Object Create Events
+
+Destination:
+
+Lambda
+
+Pilih:
+
+lks2026-image-analysis
+STEP 10 — Uji
+
+Upload:
+
+invoice.jpg
+
+Alur otomatis:
+
+S3 Upload
+↓
+Lambda Trigger
+↓
+Rekognition OCR
+↓
+DynamoDB
+
+Hasil DynamoDB:
+
+{
+  "image_name":"invoice.jpg",
+  "labels":["Document","Paper","Receipt"],
+  "texts":[
+    "INVOICE",
+    "TOTAL: 500000"
+  ]
+}
+Skenario Soal LKS yang Sangat Mungkin
+Bangun chatbot RAG menggunakan Bedrock + OpenSearch
+OCR dokumen otomatis menggunakan Rekognition
+Upload PDF → Index ke Vector Database → Tanya Jawab AI
+Upload Gambar → Analisis → Simpan ke DynamoDB
+Gabungkan RAG + API Gateway + Lambda
+Knowledge Base internal perusahaan berbasis Bedrock
+Serverless AI Assistant dengan Bedrock, OpenSearch, S3, Lambda
+
+Jika targetmu LKS 2026, kombinasi yang paling kuat untuk dipelajari adalah:
+
+ECS/Fargate
++
+API Gateway
++
+Lambda
++
+DynamoDB
++
+OpenSearch
++
+Bedrock (RAG)
++
+CI/CD CodePipeline
++
+Terraform
+
+karena kombinasi ini mencakup hampir seluruh layanan AWS modern yang sering muncul dalam kompetisi cloud tingkat lanjut.
