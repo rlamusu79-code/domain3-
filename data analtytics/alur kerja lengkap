@@ -1,0 +1,375 @@
+Modul C ini fokus pada Data Analytics Serverless di AWS menggunakan S3 + Glue + Athena + OpenSearch.
+
+Alur Kerja Lengkap
+Data CSV Mentah
+        │
+        ▼
+S3 (raw-data)
+        │
+        ▼
+Glue Crawler
+(deteksi schema otomatis)
+        │
+        ▼
+Glue Data Catalog
+(metadata tabel)
+        │
+        ▼
+Glue ETL Job (PySpark)
+(cleaning + transform)
+        │
+        ▼
+S3 (processed-data)
+(format Parquet)
+        │
+        ▼
+Athena
+(SQL Query)
+        │
+        ▼
+OpenSearch Dashboard
+(visualisasi)
+1. Siapkan Data Mentah
+
+Misalnya file:
+
+transactions.csv
+
+transaction_id,user_id,category,amount,status,created_at
+TX001,U001,Food,100,Success,2026-01-01
+TX002,U002,Transport,50,Success,2026-01-02
+TX003,U003,Food,200,Success,2026-01-03
+TX004,U001,Shopping,500,Failed,2026-01-05
+TX005,U004,Food,300,Success,2026-01-06
+
+Upload ke bucket:
+
+s3://lks2026-data/raw/transactions.csv
+2. Buat Bucket S3
+
+Masuk:
+
+AWS Console
+→ S3
+→ Create Bucket
+
+Nama:
+
+lks2026-data
+
+Struktur folder:
+
+lks2026-data
+│
+├── raw/
+│    └── transactions.csv
+│
+└── processed/
+3. Buat Glue Database
+
+Masuk:
+
+AWS Glue
+→ Data Catalog
+→ Databases
+→ Add Database
+
+Nama:
+
+lks2026_db
+4. Buat Glue Crawler
+
+Masuk:
+
+AWS Glue
+→ Crawlers
+→ Create Crawler
+Data Source
+S3
+
+Path:
+
+s3://lks2026-data/raw/
+Target Database
+lks2026_db
+
+Crawler Name:
+
+raw-transactions-crawler
+
+Run crawler.
+
+5. Hasil Crawler
+
+Crawler akan membuat tabel:
+
+raw_transactions
+
+Schema otomatis:
+
+Column	Type
+transaction_id	string
+user_id	string
+category	string
+amount	bigint
+status	string
+created_at	string
+6. Buat IAM Role Glue
+
+Masuk:
+
+IAM
+→ Roles
+→ Create Role
+
+Pilih:
+
+Glue
+
+Tambahkan policy:
+
+AWSGlueServiceRole
+AmazonS3FullAccess
+
+Nama:
+
+GlueETLRole
+7. Buat Glue ETL Job
+
+Masuk:
+
+Glue
+→ ETL Jobs
+→ Create Job
+
+Nama:
+
+transaction-etl
+
+IAM Role:
+
+GlueETLRole
+
+Engine:
+
+Spark
+
+Version:
+
+Glue 5.0
+8. Masukkan Script ETL
+
+Script yang Anda kirim sudah benar.
+
+Fungsinya:
+
+Membersihkan data
+.dropna(subset=['transaction_id', 'amount'])
+
+Menghapus data kosong.
+
+Filter transaksi valid
+.filter(col('amount') > 0)
+
+Menghapus nilai negatif atau nol.
+
+Konversi tanggal
+.withColumn('transaction_date',
+            to_date(col('created_at')))
+
+Contoh:
+
+2026-01-01
+
+menjadi tipe date.
+
+Membuat partisi
+.withColumn('year', ...)
+.withColumn('month', ...)
+
+Hasil:
+
+Date	Year	Month
+2026-01-01	2026	1
+Menyimpan ke Parquet
+.partitionBy("year","month")
+.parquet(...)
+
+Output:
+
+processed/
+└── transactions/
+    └── year=2026/
+         └── month=1/
+              part-00000.parquet
+9. Jalankan Job
+
+Klik:
+
+Run Job
+
+Tunggu status:
+
+Succeeded
+
+Cek hasil di:
+
+s3://lks2026-data/processed/transactions/
+10. Query dengan Athena
+
+Masuk:
+
+Athena
+
+Buat database:
+
+CREATE DATABASE IF NOT EXISTS lks2026_db;
+
+Buat tabel:
+
+CREATE EXTERNAL TABLE lks2026_db.transactions (
+  transaction_id STRING,
+  user_id STRING,
+  category STRING,
+  amount DOUBLE,
+  status STRING
+)
+PARTITIONED BY (
+  year INT,
+  month INT
+)
+STORED AS PARQUET
+LOCATION 's3://lks2026-data/processed/transactions/';
+
+Load partisi:
+
+MSCK REPAIR TABLE lks2026_db.transactions;
+11. Contoh Query Athena
+Total transaksi per kategori
+SELECT
+ category,
+ COUNT(*) total_tx,
+ SUM(amount) total_amount
+FROM lks2026_db.transactions
+GROUP BY category;
+
+Hasil:
+
+Category	Total Tx	Amount
+Food	3	600
+Transport	1	50
+Shopping	1	500
+Top kategori
+SELECT
+ category,
+ SUM(amount) total_amount
+FROM lks2026_db.transactions
+GROUP BY category
+ORDER BY total_amount DESC
+LIMIT 5;
+Total transaksi sukses
+SELECT
+ SUM(amount)
+FROM lks2026_db.transactions
+WHERE status='Success';
+
+Hasil:
+
+650
+12. Integrasi OpenSearch
+
+Buat domain OpenSearch:
+
+Amazon OpenSearch Service
+→ Create Domain
+
+Nama:
+
+lks2026-opensearch
+
+Engine:
+
+OpenSearch 2.x
+
+Deployment:
+
+Development and Testing
+13. Athena → OpenSearch
+
+Cara yang umum dipakai:
+
+Athena
+→ Query Result
+→ S3
+→ Lambda / Glue
+→ OpenSearch Index
+
+Contoh index:
+
+transactions
+
+Dokumen:
+
+{
+  "transaction_id":"TX001",
+  "category":"Food",
+  "amount":100,
+  "status":"Success"
+}
+14. Dashboard OpenSearch
+
+Buat visualisasi:
+
+Pie Chart
+Category Distribution
+
+Menampilkan:
+
+Food 60%
+Transport 10%
+Shopping 30%
+Bar Chart
+Top Categories by Revenue
+Time Series
+Transactions Per Day
+Optimasi yang Sering Ditanya Saat LKS
+Gunakan Parquet
+
+CSV:
+
+100 MB
+
+Parquet:
+
+10–20 MB
+
+Lebih cepat dan lebih murah.
+
+Gunakan Partisi
+year=2026/month=1
+
+Athena hanya membaca folder yang dibutuhkan.
+
+Contoh:
+
+WHERE year=2026
+AND month=1
+
+Biaya query jauh lebih kecil.
+
+Hasil Akhir yang Diharapkan
+S3 Raw Data
+     ↓
+Glue Crawler
+     ↓
+Glue Catalog
+     ↓
+Glue ETL Job
+     ↓
+Parquet + Partition
+     ↓
+Athena Query
+     ↓
+OpenSearch Dashboard
+
+Ini adalah arsitektur Data Analytics serverless yang sering digunakan untuk studi kasus transaksi, log aplikasi, maupun data penjualan di AWS.
